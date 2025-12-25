@@ -1,1 +1,1 @@
-from .artrackmamba_seq import build_artrack_mamba_seq
+from .artrackmamba_seq import build_artrackmamba_seq

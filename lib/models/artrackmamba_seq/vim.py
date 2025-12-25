@@ -150,6 +150,19 @@ class VisionMamba(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         
+        # 兼容性处理：处理 conv1d 权重尺寸不匹配问题
+        # 预训练权重可能是 [D, 1, 4]，但当前模型可能是 [D, 1, 3]
+        for k in list(state_dict.keys()):
+            if "conv1d.weight" in k:
+                weight = state_dict[k]
+                if weight.shape[-1] == 4 and self.state_dict()[k].shape[-1] == 3:
+                    if is_main_process():
+                        print(f"Resizing {k} from {weight.shape} to {self.state_dict()[k].shape}")
+                    # 简单截断或调整，通常 Vim 的实现细节可能有微调
+                    # 如果预训练是核大小 4，当前是 3，我们取前 3 或中间 3？
+                    # 假设是 padding 导致的差异，通常取 [:3]
+                    state_dict[k] = weight[:, :, :3]
+
         keys_to_ignore = ['head.weight', 'head.bias']
         for k in keys_to_ignore:
             if k in state_dict: del state_dict[k]

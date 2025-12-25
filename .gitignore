@@ -24,9 +24,17 @@ MANIFEST
 
 # VS Code
 .vscode/
+*.code-workspace
+.trae
 
 # Pycharm
 .idea/
 
 # System
 .DS_Store
+
+# Output
+output*/
+
+# Pretrained models
+pretrained_models/

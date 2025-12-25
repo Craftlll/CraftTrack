@@ -5,7 +5,7 @@ from torch.nn.utils import clip_grad_norm_
 # from lib.train.data.wandb_logger import WandbWriter
 from lib.train.trainers import BaseTrainer
 from lib.train.admin import AverageMeter, StatValue
-from memory_profiler import profile
+# from memory_profiler import profile
 # from lib.train.admin import TensorboardWriter
 import torch
 import time

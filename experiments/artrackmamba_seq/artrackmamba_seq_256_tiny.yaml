@@ -1,0 +1,84 @@
+DATA:
+  MAX_SAMPLE_INTERVAL: 200 # 序列采样时的最大帧间隔 (控制序列的时间跨度)
+  MEAN:                    # 图像归一化均值 (ImageNet标准)
+  - 0.485
+  - 0.456
+  - 0.406
+  SEARCH:
+    CENTER_JITTER: 3       # 搜索区域中心抖动范围 (数据增强：模拟目标移动)
+    FACTOR: 4.0            # 搜索区域相对于目标大小的倍数 (4倍于目标)
+    SCALE_JITTER: 0.25     # 搜索区域尺度抖动范围 (数据增强：模拟目标缩放)
+    SIZE: 256              # 搜索区域输入图像尺寸 (256x256)
+    NUMBER: 6              # 搜索帧数量 (提升到6帧以利用时序信息，对比基准的24帧，兼顾显存)
+  STD:                     # 图像归一化标准差 (ImageNet标准)
+  - 0.229
+  - 0.224
+  - 0.225
+  TEMPLATE:
+    CENTER_JITTER: 0       # 模板区域中心抖动 (通常为0，保持模板居中)
+    FACTOR: 2.0            # 模板区域相对于目标大小的倍数 (2倍于目标)
+    SCALE_JITTER: 0        # 模板区域尺度抖动 (通常为0，保持模板真实尺度)
+    SIZE: 128              # 模板区域输入图像尺寸 (128x128)
+  TRAIN:
+    DATASETS_NAME:         # 训练数据集列表
+    - GOT10K_train_full    # 【修改】使用 GOT10K 全量训练集，对齐基准
+    DATASETS_RATIO:        # 各数据集采样比例 (1:1:1:1 表示均匀采样)
+    - 1
+    SAMPLE_PER_EPOCH: 60000 # 【修改】恢复到标准采样数 (60k)，保证充分训练
+  VAL:
+    DATASETS_NAME:         # 验证数据集列表
+    - GOT10K_official_val  # 【修改】使用 GOT10K 官方验证集，对齐基准
+    DATASETS_RATIO:        # 验证集采样比例
+    - 1
+    SAMPLE_PER_EPOCH: 10000 # 验证集采样样本数 (决定验证跑多久)
+
+MODEL:
+  NAME: "artrackmamba_seq_256_tiny" # 模型名称 ID
+  
+  BACKBONE:
+    # Vim-Tiny: 192 dim, 24 layers (Vision Mamba Tiny 版本)
+    TYPE: "vim_tiny_patch16_224_bimamba_v2_final" # 主干网络具体型号
+    STRIDE: 16             # Patch Stride (通常等于 Patch Size)
+    PRETRAINED: True       # 是否加载预训练权重
+    PRETRAINED_PATH: "pretrained_models/vim/vim_t_midclstok_76p1acc.pth" # 预训练权重路径
+    DROP_PATH_RATE: 0.0    # Drop Path 比率 (Tiny模型通常不需要太强的DropPath)
+
+  HEAD:
+    TYPE: "CENTER"         # 检测头类型 (CenterHead: 预测中心点和尺寸)
+    NUM_CHANNELS: 192      # Head输入通道数 (【关键】必须匹配 Backbone 输出维度)
+    VOCAB_SIZE: 4096       # 离散化坐标的词表大小 (将坐标分为4096个bins)
+
+  MEMORY:
+    USE: True              # 是否开启记忆/动态模板更新机制
+    CAPACITY: 50           # 记忆库容量 (最多保存多少帧历史信息)
+    UPDATE_INTERVAL: 5     # 记忆更新间隔 (每隔几帧更新一次)
+    CONF_THRESHOLD: 0.7    # 记忆更新置信度阈值 (置信度高才更新)
+
+  EXTRA:
+    SIGMA_FACTOR: 2.0      # 高斯热图生成的 Sigma 因子 (控制热图的扩散程度)
+
+TRAIN:
+  BACKBONE_MULTIPLIER: 0.1  # 主干网络学习率倍率 (0.1x LR)，保持预训练特征稳定
+  BATCH_SIZE: 64            # 批次大小 (Tiny模型显存占用小，可开大以稳定梯度)
+  DEEP_SUPERVISION: False   # 深层监督 (是否计算中间层Loss，此处关闭)
+  EPOCH: 30                 # 总训练轮数 (对齐基准：30 Epoch)
+  grad_clip_max_norm: 0.1   # 梯度裁剪阈值 (防止梯度爆炸，Mamba/Transformer必备)
+  LR: 0.0001                # 初始学习率 (1e-4，AdamW标准配置)
+  MIN_LR: 0.00001           # 最小学习率 (1e-5，余弦退火下限)
+  NUM_WORKER: 8             # 数据加载线程数 (建议设为CPU核心数)
+  OPTIMIZER: "ADAMW"        # 优化器类型 (AdamW: 带权重衰减的Adam，适合大模型)
+  LR_SCHEDULER: "cosine"    # 学习率调度策略 (余弦退火，平滑下降)
+  PRINT_INTERVAL: 50        # 日志打印间隔 (每50个batch打印一次)
+  SCHEDULER:
+    TYPE: "step"            # (备用) 阶梯式调度配置
+    DECAY_RATE: 0.1         # (备用) 阶梯式衰减率
+  VAL_EPOCH_INTERVAL: 1     # 验证间隔 (每1个Epoch验证一次)
+  WEIGHT_DECAY: 0.05        # 权重衰减系数 (【修改】提升到0.05，对齐基准)
+  AMP: True                 # 自动混合精度训练 (开启FP16，显存减半速度翻倍)
+
+TEST:
+  EPOCH: 60                # 测试时使用的模型 Epoch (默认加载第60轮)
+  SEARCH_FACTOR: 4.0       # 测试时搜索区域倍率 (应与训练一致)
+  SEARCH_SIZE: 256         # 测试时搜索区域尺寸 (应与训练一致)
+  TEMPLATE_FACTOR: 2.0     # 测试时模板区域倍率 (应与训练一致)
+  TEMPLATE_SIZE: 128       # 测试时模板区域尺寸 (应与训练一致)

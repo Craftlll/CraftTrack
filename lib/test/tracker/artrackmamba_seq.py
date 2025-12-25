@@ -1,79 +1,81 @@
-import torch
 from lib.test.tracker.basetracker import BaseTracker
-from lib.models.artrackmamba_seq import build_artrack_mamba_seq
+from lib.models.artrack_mamba_seq import build_artrack_mamba_seq
 from lib.train.data.processing_utils import sample_target
-import torch.nn.functional as F
+from lib.utils.box_ops import clip_box
+import torch
 
-class ARTrackMambaTracker(BaseTracker):
+class ARTrackMambaSeq(BaseTracker):
+    """
+    适配 PyTracking 测试框架的 Tracker 类
+    """
     def __init__(self, params, dataset_name):
-        super(ARTrackMambaTracker, self).__init__(params)
+        super(ARTrackMambaSeq, self).__init__(params)
         self.dataset_name = dataset_name
         
-        # 1. 构建网络
-        self.network = build_artrack_mamba_seq(params.cfg)
-        self.network.load_state_dict(torch.load(self.params.checkpoint, map_location='cpu')['net'], strict=True)
+        # 1. 构建网络 (使用 params.cfg 中的配置)
+        self.network = build_artrack_mamba_seq(self.params.cfg)
+        
+        # 2. 加载权重
+        # 必须处理 'net' 前缀，因为 ltr_trainer 保存时会包一层
+        checkpoint = torch.load(self.params.checkpoint, map_location='cpu')
+        if 'net' in checkpoint:
+            self.network.load_state_dict(checkpoint['net'], strict=True)
+        else:
+            self.network.load_state_dict(checkpoint, strict=True)
+            
         self.network.cuda()
         self.network.eval()
         
-        # 2. 状态存储 (Memory Bank)
-        # self.memory = [] # 用于 RAG
+        self.preprocessor = Preprocessor() # 需定义或复用 ARTrack 的 Preprocessor
+        self.state = None
 
     def initialize(self, image, info):
-        """
-        第一帧初始化
-        """
-        # Crop 模板区域
-        z_patch_arr, resize_factor, z_amask_arr = sample_target(image, info['init_bbox'], self.params.template_factor,
-                                                    output_sz=self.params.template_size)
-        self.z_patch = self.preprocessor.process(z_patch_arr, z_amask_arr)
-        
-        # 保存初始状态
+        # 初始化状态: xywh
         self.state = info['init_bbox']
-        self.frame_id = 0
         
-        # Mamba 不需要显式保存 hidden state (如果是非流式推理模式)
-        # 但如果是流式推理 (Stateful Mamba)，这里需要 init_state
+        # 提取模板特征 (Z)
+        # 这里简化逻辑，实际需参考 ARTrack 的 sample_target
+        z_patch, _, _ = sample_target(image, self.state, self.params.template_factor, output_sz=self.params.template_size)
+        
+        # 预处理并转 Tensor
+        self.z_dict = {
+            'template': self.preprocessor.process(z_patch).cuda()
+        }
 
     def track(self, image, info=None):
-        """
-        后续帧跟踪
-        """
         H, W, _ = image.shape
-        self.frame_id += 1
         
-        # 1. Crop 搜索区域 (基于上一帧位置 self.state)
-        x_patch_arr, resize_factor, x_amask_arr = sample_target(image, self.state, self.params.search_factor,
-                                                    output_sz=self.params.search_size)
-        x_patch = self.preprocessor.process(x_patch_arr, x_amask_arr)
+        # 1. 提取搜索区域 (X)
+        x_patch, resize_factor, _ = sample_target(image, self.state, self.params.search_factor, output_sz=self.params.search_size)
+        x_tensor = self.preprocessor.process(x_patch).cuda()
         
-        # 2. 网络推理
+        # 2. 推理
         with torch.no_grad():
-            # forward 返回 pred_logits, pred_boxes
-            logits, boxes = self.network(self.z_patch, x_patch)
+            # 这里调用我们在 artrack_mamba_seq.py 里统一过的接口 (返回 dict)
+            outputs = self.network(self.z_dict['template'], x_tensor)
             
-        # 3. 解码结果
-        # boxes: [1, 4, 4] -> 我们取平均或特定 token 的 box
-        # 这里假设 reg_head 直接输出了 [cx, cy, w, h] (归一化)
-        pred_box = boxes[0].mean(dim=0) # [4]
+        # 3. 解析结果
+        # 假设 pred_boxes 是 [1, 4] 归一化坐标 (cx, cy, w, h)
+        pred_box = outputs['pred_boxes'].squeeze(0).cpu().numpy()
         
-        # 4. 反归一化到原图坐标
-        pred_box = (pred_box * self.params.search_size) / resize_factor
-        
-        # 加上 crop 的偏移量
-        cx = pred_box[0] + self.state[0] + (1 - self.params.search_factor) * self.state[2] / 2 # 简化逻辑，需根据 sample_target 调整
-        cy = pred_box[1] + self.state[1] + (1 - self.params.search_factor) * self.state[3] / 2
-        w = pred_box[2]
-        h = pred_box[3]
-        
-        # 更新状态
-        self.state = [cx - w/2, cy - h/2, w, h] # xywh
-        
-        # 5. (可选) 记忆库更新逻辑
-        # if confidence > threshold:
-        #    self.memory.append(...)
-        
+        # 4. 映射回原图坐标
+        # 反归一化 -> 加上 crop 偏移 -> clip
+        pred_box = self.map_box_back(pred_box, resize_factor)
+        self.state = clip_box(pred_box, H, W, margin=10)
+
         return {"target_bbox": self.state}
 
-    def _post_process(self, pred_box, resize_factor):
-        # 实现具体的坐标还原逻辑
-        pass
+    def map_box_back(self, pred_box, resize_factor):
+        # 简单的坐标映射逻辑 (参考 ARTrack 原版实现)
+        cx_prev, cy_prev, w_prev, h_prev = self.state
+        half_side = 0.5 * self.params.search_size / resize_factor
+        
+        cx_real = pred_box[0] * (self.params.search_size / resize_factor) + (cx_prev - half_side)
+        # ... (略，需补全具体数学计算)
+        return [cx_real, cy_real, w_prev, h_prev] # 仅作示例
+
+class Preprocessor(object):
+    def process(self, img_arr):
+        # Normalize & ToTensor
+        img_tensor = torch.tensor(img_arr).permute(2, 0, 1).float().unsqueeze(0)
+        return img_tensor

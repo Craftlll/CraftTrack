@@ -5,11 +5,12 @@ from torch.nn.utils import clip_grad_norm_
 # from lib.train.data.wandb_logger import WandbWriter
 from lib.train.trainers import BaseTrainer
 from lib.train.admin import AverageMeter, StatValue
-from memory_profiler import profile
+# from memory_profiler import profile
 # from lib.train.admin import TensorboardWriter
 import torch
 import time
 import numpy as np
+from tqdm import tqdm
 from torch.utils.data.distributed import DistributedSampler
 from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler
@@ -75,8 +76,10 @@ class LTRSeqTrainerV2(BaseTrainer):
         torch.set_grad_enabled(loader.training)
 
         self._init_timing()
-
-        for i, data in enumerate(loader, 1):
+        
+        self.pbar = tqdm(loader, desc=f'[{loader.name}: {self.epoch}]', ncols=120, leave=True)
+        
+        for i, data in enumerate(self.pbar, 1):
             self.actor.eval()
             self.data_read_done_time = time.time()
             with torch.no_grad():
@@ -120,8 +123,12 @@ class LTRSeqTrainerV2(BaseTrainer):
             bs_backward = 1
 
             # print(self.actor.net.module.box_head.decoder.layers[2].mlpx.fc1.weight)
-            self.optimizer.zero_grad()
-            self.actor.train()
+            if loader.training:
+                self.optimizer.zero_grad()
+                self.actor.train()
+            else:
+                self.actor.eval()
+                
             while cursor < num_seq * 2:
                 model_inputs = {}
                 model_inputs['slt_loss_weight'] = 15
@@ -139,7 +146,8 @@ class LTRSeqTrainerV2(BaseTrainer):
 
                 loss, stats_cur = self.actor.compute_sequence_losses(model_inputs)
 
-                loss.backward()
+                if loader.training:
+                    loss.backward()
 
                 for key, val in stats_cur.items():
                     if key in stats:
@@ -147,10 +155,11 @@ class LTRSeqTrainerV2(BaseTrainer):
                     else:
                         stats[key] = val * (bs_backward / num_seq)
                 cursor += bs_backward
-            grad_norm = clip_grad_norm_(self.actor.net.parameters(), 100)
-            stats['grad_norm'] = grad_norm
-
-            self.optimizer.step()
+            
+            if loader.training:
+                grad_norm = clip_grad_norm_(self.actor.net.parameters(), 100)
+                stats['grad_norm'] = grad_norm
+                self.optimizer.step()
 
             miou = np.mean(miou_record)
             self.miou_list.append(miou)
@@ -163,6 +172,10 @@ class LTRSeqTrainerV2(BaseTrainer):
             self._update_stats(stats, batch_size, loader)
             self._print_stats(i, loader, batch_size)
             torch.cuda.empty_cache()
+            
+        if hasattr(self, 'pbar'):
+            self.pbar.close()
+            del self.pbar
 
 
     def train_epoch(self):
@@ -229,6 +242,15 @@ class LTRSeqTrainerV2(BaseTrainer):
             # print_str += 'DataTime: %.3f (%.3f)  ,  ' % (self.data_read_done_time - prev_frame_time_backup, self.data_to_gpu_time - self.data_read_done_time)
             # print_str += 'ForwardTime: %.3f  ,  ' % (current_time - self.data_to_gpu_time)
             # print_str += 'TotalTime: %.3f  ,  ' % (current_time - prev_frame_time_backup)
+            
+            # Update pbar postfix
+            if hasattr(self, 'pbar'):
+                postfix = OrderedDict()
+                postfix['Loss'] = f"{self.stats[loader.name]['Loss/total'].avg:.4f}"
+                if 'mIoU' in self.stats[loader.name]:
+                    postfix['mIoU'] = f"{self.stats[loader.name]['mIoU'].avg:.4f}"
+                postfix['FPS'] = f"{average_fps:.1f}"
+                self.pbar.set_postfix(postfix)
 
             for name, val in self.stats[loader.name].items():
                 if (self.settings.print_stats is None or name in self.settings.print_stats):
@@ -237,7 +259,12 @@ class LTRSeqTrainerV2(BaseTrainer):
                     # else:
                     #     print_str += '%s: %r  ,  ' % (name, val)
 
-            print(print_str[:-5])
+            # Use pbar.write instead of print to avoid interfering with progress bar
+            if hasattr(self, 'pbar'):
+                self.pbar.write(print_str[:-5])
+            else:
+                print(print_str[:-5])
+                
             log_str = print_str[:-5] + '\n'
             with open(self.settings.log_file, 'a') as f:
                 f.write(log_str)

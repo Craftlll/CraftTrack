@@ -17,8 +17,9 @@ from lib.models.artrack import build_artrack
 from lib.models.artrackv2 import build_artrackv2
 from lib.models.artrack_seq import build_artrack_seq
 from lib.models.artrackv2_seq import build_artrackv2_seq
+from lib.models.artrackmamba_seq import build_artrackmamba_seq
 # forward propagation related
-from lib.train.actors import ARTrackActor, ARTrackSeqActor, ARTrackV2Actor, ARTrackV2SeqActor
+from lib.train.actors import ARTrackActor, ARTrackSeqActor, ARTrackV2Actor, ARTrackV2SeqActor, ARTrackMambaSeqActor
 # for import modules
 import importlib
 
@@ -178,6 +179,20 @@ def run(settings):
         loader_train = SLTLoader('train', dataset_train, training=True, batch_size=cfg.TRAIN.BATCH_SIZE,
                                  num_workers=cfg.TRAIN.NUM_WORKER,
                                  shuffle=False, drop_last=True)
+    elif settings.script_name == "artrackmamba_seq":
+        net = build_artrackmamba_seq(cfg)
+        # Using sequence_sampler_v2 similar to artrackv2_seq
+        dataset_train = sequence_sampler_v2.SequenceSampler(
+            datasets=names2datasets(cfg.DATA.TRAIN.DATASETS_NAME, settings, opencv_loader),
+            p_datasets=cfg.DATA.TRAIN.DATASETS_RATIO,
+            samples_per_epoch=cfg.DATA.TRAIN.SAMPLE_PER_EPOCH,
+            max_gap=cfg.DATA.MAX_GAP, max_interval=cfg.DATA.MAX_INTERVAL,
+            num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=1,
+            frame_sample_mode='random_interval',
+            prob=cfg.DATA.INTERVAL_PROB)
+        loader_train = SLTLoader('train', dataset_train, training=True, batch_size=cfg.TRAIN.BATCH_SIZE,
+                                 num_workers=cfg.TRAIN.NUM_WORKER,
+                                 shuffle=False, drop_last=True)
     else:
         raise ValueError("illegal script name")
 
@@ -213,6 +228,11 @@ def run(settings):
         objective = {'giou': giou_loss, 'l1': l1_loss, 'focal': focal_loss}
         loss_weight = {'giou': cfg.TRAIN.GIOU_WEIGHT, 'l1': cfg.TRAIN.L1_WEIGHT, 'focal': 2., 'score_update': cfg.TRAIN.SCORE_WEIGHT}
         actor = ARTrackV2SeqActor(net=net, objective=objective, loss_weight=loss_weight, settings=settings, cfg=cfg, bins=bins, search_size=search_size)
+    elif settings.script_name == "artrackmamba_seq":
+        focal_loss = FocalLoss()
+        objective = {'giou': giou_loss, 'l1': l1_loss, 'focal': focal_loss}
+        loss_weight = {'giou': cfg.TRAIN.GIOU_WEIGHT, 'l1': cfg.TRAIN.L1_WEIGHT, 'focal': 2., 'score_update': cfg.TRAIN.SCORE_WEIGHT}
+        actor = ARTrackMambaSeqActor(net=net, objective=objective, loss_weight=loss_weight, settings=settings, cfg=cfg, bins=bins, search_size=search_size)
     else:
         raise ValueError("illegal script name")
 
@@ -224,6 +244,9 @@ def run(settings):
         optimizer, lr_scheduler = get_optimizer_scheduler(net, cfg)
     elif settings.script_name == 'artrackv2' or settings.script_name == 'artrackv2_seq':
         optimizer, lr_scheduler = get_optimizer_scheduler_v2(net, cfg)
+    elif settings.script_name == 'artrackmamba_seq':
+        optimizer, lr_scheduler = get_optimizer_scheduler_v2(net, cfg)
+        
     use_amp = getattr(cfg.TRAIN, "AMP", False)
     if settings.script_name == "artrack":
         trainer = LTRTrainer(actor, [loader_train, loader_val], optimizer, settings, lr_scheduler, use_amp=use_amp)
@@ -232,6 +255,8 @@ def run(settings):
     elif settings.script_name == "artrackv2":
         trainer = LTRTrainer(actor, [loader_train, loader_val], optimizer, settings, lr_scheduler, use_amp=use_amp)
     elif settings.script_name == "artrackv2_seq":
+        trainer = LTRSeqTrainerV2(actor, [loader_train], optimizer, settings, lr_scheduler, use_amp=use_amp)
+    elif settings.script_name == "artrackmamba_seq":
         trainer = LTRSeqTrainerV2(actor, [loader_train], optimizer, settings, lr_scheduler, use_amp=use_amp)
 
     # train process

@@ -46,7 +46,7 @@ MODEL:
     STRIDE: 16
     PRETRAINED: True
     # 请确保下载了官方权重并放在此路径
-    PRETRAINED_PATH: "output/checkpoints/vim/vim_small_patch16_224_bimamba_v2_final.pth"
+    PRETRAINED_PATH: "pretrained_models/vim/vim_s_midclstok_80p5acc.pth"
     
     # Mamba 特有配置 (通常由 Type 决定，但可在此覆盖)
     DROP_PATH_RATE: 0.1
