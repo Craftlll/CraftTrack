@@ -180,9 +180,14 @@ def run(settings):
             num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=num_template_frames,
             frame_sample_mode='random_interval',
             prob=cfg.DATA.INTERVAL_PROB)
+        
+        sampler = None
+        if settings.local_rank != -1:
+            sampler = DistributedSampler(dataset_train)
+            
         loader_train = SLTLoader('train', dataset_train, training=True, batch_size=cfg.TRAIN.BATCH_SIZE,
                                  num_workers=cfg.TRAIN.NUM_WORKER,
-                                 shuffle=False, drop_last=True)
+                                 shuffle=False, drop_last=True, sampler=sampler)
         
         dataset_val = sequence_sampler_v2.SequenceSampler(
             datasets=names2datasets(cfg.DATA.VAL.DATASETS_NAME, settings, opencv_loader),

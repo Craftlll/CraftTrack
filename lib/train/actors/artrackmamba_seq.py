@@ -12,6 +12,7 @@ from lib.utils.merge import merge_template_search
 from torch.distributions.categorical import Categorical
 from ...utils.heapmap_utils import generate_heatmap
 from ...utils.ce_utils import generate_mask_cond, adjust_keep_rate
+import concurrent.futures
 
 
 def IoU(rect1, rect2):
@@ -287,23 +288,17 @@ class ARTrackMambaSeqActor(BaseActor):
         
         # Initialize Focal Loss if needed
         if self.focal is None:
-            # V2 uses CrossEntropyLoss with weights as "focal"?
-            # Actually V2 code shows: self.focal = torch.nn.CrossEntropyLoss(...)
-            # with specific weights for special tokens.
-            
-            # FIX: Ensure weight tensor matches VOCAB_SIZE (4096) not just calculated bins (806)
-            vocab_size = self.cfg.MODEL.HEAD.VOCAB_SIZE
-            weight = torch.ones(vocab_size) * 1.0
-            
-            # Lower weight for special tokens
-            # V2 logic: weight[self.bins * self.range + i] = 0.1
-            base_idx = self.bins * self.range
-            for i in range(5):
-                 if base_idx + i < vocab_size:
-                     weight[base_idx + i] = 0.1
-                     
-            weight = weight.to(score.device)
-            self.focal = torch.nn.CrossEntropyLoss(weight=weight, reduction='mean').to(score.device)
+            if not hasattr(self, 'focal_weight_tensor'):
+                 # Fallback for objects initialized before code change
+                 vocab_size = self.cfg.MODEL.HEAD.VOCAB_SIZE
+                 weight = torch.ones(vocab_size) * 1.0
+                 base_idx = self.bins * self.range
+                 for i in range(5):
+                      if base_idx + i < vocab_size:
+                          weight[base_idx + i] = 0.1
+                 self.focal_weight_tensor = weight
+
+            self.focal = torch.nn.CrossEntropyLoss(weight=self.focal_weight_tensor.to(score.device), reduction='mean').to(score.device)
 
         # Prepare Target
         # search_anno is [x, y, w, h] (normalized?)
@@ -506,7 +501,7 @@ class ARTrackMambaSeqActor(BaseActor):
         im_patch = im_patch[np.newaxis, :, :, :]
         im_patch = im_patch.astype(np.float32)
         im_patch = torch.from_numpy(im_patch)
-        im_patch = im_patch.cuda()
+        # im_patch = im_patch.cuda()
         return im_patch
 
     def batch_init(self, images, template_bbox, initial_bbox) -> dict:
@@ -563,6 +558,54 @@ class ARTrackMambaSeqActor(BaseActor):
         out = {'template_images': z_crop, "z_1": z_1_crop, "z_2": z_2_crop, "z_2_feat": z_2_feat}
         return out
 
+    def _track_process_one(self, img_i, initial_bbox_i, s_x_i, center_pos_i, pre_bbox_i, gt_boxes_corner_i):
+        template_factor = self.cfg.DATA.TEMPLATE.FACTOR
+        s_z_1 = np.ceil(np.sqrt(initial_bbox_i[2] * template_factor * initial_bbox_i[3] * template_factor))
+        channel_avg = np.mean(img_i, axis=(0, 1))
+
+        target_in_search = self.get_subwindow(img_i, initial_bbox_i[:2], self.cfg.DATA.TEMPLATE.SIZE,
+                                              round(s_z_1), channel_avg)
+        x_crop = self.get_subwindow(img_i, center_pos_i, self.cfg.DATA.SEARCH.SIZE,
+                                    round(s_x_i), channel_avg)
+
+        if x_crop is None or target_in_search is None:
+            return None
+
+        # History Prompt
+        pre_seq = np.zeros((1, 4 * self.pre_num))
+        for q in range(self.pre_num):
+             pre_seq[:, 4*q:4*(q+1)] = bbutils.batch_center2corner(pre_bbox_i[:, 4*q:4*(q+1)])
+        
+        # Normalize History
+        pre_in = np.zeros(4 * self.pre_num)
+        if gt_boxes_corner_i is not None:
+            for w in range(self.pre_num):
+                bbox = pre_seq[0, 4*w:4*(w+1)]
+                bbox_center = bbox.reshape(2, 2) - center_pos_i
+                bbox_norm = bbox_center * (self.cfg.DATA.SEARCH.SIZE / s_x_i) + self.cfg.DATA.SEARCH.SIZE / 2
+                bbox_norm = bbox_norm / self.cfg.DATA.SEARCH.SIZE
+                pre_in[4*w:4*(w+1)] = bbox_norm.flatten()
+
+            gt_in_crop = np.zeros(4)
+            gt_corner = gt_boxes_corner_i.reshape(2, 2) - center_pos_i
+            gt_norm = gt_corner * (self.cfg.DATA.SEARCH.SIZE / s_x_i) + self.cfg.DATA.SEARCH.SIZE / 2
+            gt_in_crop[:2] = gt_norm[0]
+            gt_in_crop[2:] = gt_norm[1] - gt_norm[0]
+        else:
+            gt_in_crop = np.zeros(4)
+        
+        # Tensor prep
+        pre_seq_input = torch.from_numpy(pre_in).clamp(-0.5 * self.range + 0.5, 0.5 + self.range * 0.5)
+        pre_seq_input = (pre_seq_input + (0.5 * self.range - 0.5)) * (self.bins - 1)
+        
+        x_crop = x_crop.float().mul(1.0 / 255.0).clamp(0.0, 1.0)
+        target_in_search = target_in_search.float().mul(1.0 / 255.0).clamp(0.0, 1.0)
+        
+        x_crop[0] = tvisf.normalize(x_crop[0], self.mean, self.std, self.inplace)
+        target_in_search[0] = tvisf.normalize(target_in_search[0], self.mean, self.std, self.inplace)
+        
+        return x_crop.clone(), target_in_search.clone(), pre_in, pre_seq_input.clone(), gt_in_crop
+
     def batch_track(self, img, gt_boxes, template, dz_feat, action_mode='max') -> dict:
         search_factor = self.cfg.DATA.SEARCH.FACTOR
         w_x = self.size[:, 0] * search_factor
@@ -580,60 +623,23 @@ class ARTrackMambaSeqActor(BaseActor):
         target_in_search_list = []
         update_feat_list = []
         
-        for i in range(len(img)):
-            template_factor = self.cfg.DATA.TEMPLATE.FACTOR
-            s_z_1 = np.ceil(np.sqrt(initial_bbox[i, 2] * template_factor * initial_bbox[i, 3] * template_factor))
-            channel_avg = np.mean(img[i], axis=(0, 1))
-            
-            target_in_search = self.get_subwindow(img[i], initial_bbox[i, :2], self.cfg.DATA.TEMPLATE.SIZE,
-                                                  round(s_z_1), channel_avg)
-            x_crop = self.get_subwindow(img[i], self.center_pos[i], self.cfg.DATA.SEARCH.SIZE,
-                                        round(s_x[i]), channel_avg)
-            
-            if x_crop is None or target_in_search is None:
-                return None
-                
-            # History Prompt Construction
-            pre_seq = np.zeros((1, 4 * self.pre_num))
-            for q in range(self.pre_num):
-                 pre_seq[:, 4*q:4*(q+1)] = bbutils.batch_center2corner(self.pre_bbox[i:i+1, 4*q:4*(q+1)])
-            
-            # Normalize History
-            pre_in = np.zeros(4 * self.pre_num)
-            if gt_boxes_corner is not None:
-                for w in range(self.pre_num):
-                    # Relativize and Normalize
-                    bbox = pre_seq[0, 4*w:4*(w+1)]
-                    bbox_center = bbox.reshape(2, 2) - self.center_pos[i]
-                    bbox_norm = bbox_center * (self.cfg.DATA.SEARCH.SIZE / s_x[i]) + self.cfg.DATA.SEARCH.SIZE / 2
-                    bbox_norm = bbox_norm / self.cfg.DATA.SEARCH.SIZE
-                    pre_in[4*w:4*(w+1)] = bbox_norm.flatten()
+        def run_one(idx):
+             return self._track_process_one(img[idx], initial_bbox[idx], s_x[idx], 
+                                            self.center_pos[idx], self.pre_bbox[idx:idx+1], 
+                                            gt_boxes_corner[idx] if gt_boxes_corner is not None else None)
 
-                gt_in_crop = np.zeros(4)
-                gt_corner = gt_boxes_corner[i].reshape(2, 2) - self.center_pos[i]
-                gt_norm = gt_corner * (self.cfg.DATA.SEARCH.SIZE / s_x[i]) + self.cfg.DATA.SEARCH.SIZE / 2
-                gt_in_crop[:2] = gt_norm[0]
-                gt_in_crop[2:] = gt_norm[1] - gt_norm[0] # xyxy -> xywh
-                gt_in_crop_list.append(gt_in_crop)
-            else:
-                gt_in_crop_list.append(np.zeros(4))
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results = list(executor.map(run_one, range(len(img))))
             
-            pre_seq_list.append(pre_in)
+        if any(r is None for r in results):
+            return None
             
-            # Prepare Input Tensor for Model
-            pre_seq_input = torch.from_numpy(pre_in).clamp(-0.5 * self.range + 0.5, 0.5 + self.range * 0.5)
-            pre_seq_input = (pre_seq_input + (0.5 * self.range - 0.5)) * (self.bins - 1)
-            pre_seq_in_list.append(pre_seq_input.clone())
-            
-            # Normalize Images
-            x_crop = x_crop.float().mul(1.0 / 255.0).clamp(0.0, 1.0)
-            target_in_search = target_in_search.float().mul(1.0 / 255.0).clamp(0.0, 1.0)
-            
-            x_crop[0] = tvisf.normalize(x_crop[0], self.mean, self.std, self.inplace)
-            target_in_search[0] = tvisf.normalize(target_in_search[0], self.mean, self.std, self.inplace)
-            
-            x_crop_list.append(x_crop.clone())
-            target_in_search_list.append(target_in_search.clone())
+        for res in results:
+             x_crop_list.append(res[0])
+             target_in_search_list.append(res[1])
+             pre_seq_list.append(res[2])
+             pre_seq_in_list.append(res[3])
+             gt_in_crop_list.append(res[4])
 
         x_crop = torch.cat(x_crop_list, dim=0).cuda()
         target_in_search = torch.cat(target_in_search_list, dim=0).cuda()

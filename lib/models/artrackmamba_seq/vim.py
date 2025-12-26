@@ -8,11 +8,7 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from lib.models.layers.patch_embed_mamba import PatchEmbed
 from lib.utils.misc import is_main_process
 
-try:
-    from mamba_ssm import Mamba
-except ImportError:
-    Mamba = None
-    print("WARNING: mamba_ssm not installed.")
+from mamba_ssm import Mamba
 
 class VimBlock(nn.Module):
     def __init__(self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False, drop_path=0.):

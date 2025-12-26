@@ -9,7 +9,7 @@ DATA:
     FACTOR: 4.0            # 搜索区域相对于目标大小的倍数 (4倍于目标)
     SCALE_JITTER: 0.25     # 搜索区域尺度抖动范围 (数据增强：模拟目标缩放)
     SIZE: 256              # 搜索区域输入图像尺寸 (256x256)
-    NUMBER: 6              # 搜索帧数量 (提升到6帧以利用时序信息，对比基准，兼顾显存)
+    NUMBER: 1              # 搜索帧数量 (提升到6帧以利用时序信息，对比基准，兼顾显存)
   STD:                     # 图像归一化标准差 (ImageNet标准)
   - 0.229
   - 0.224
@@ -73,7 +73,7 @@ MODEL:
 
 TRAIN:
   BACKBONE_MULTIPLIER: 0.1  # 主干网络学习率倍率 (0.1x LR)
-  BATCH_SIZE: 16            # 批次大小 (Base模型显存占用大，设为16，仍优于基准的8)
+  BATCH_SIZE: 8            # 批次大小 (Base模型显存占用大，设为16，仍优于基准的8)
   DEEP_SUPERVISION: False   # 深层监督
   EPOCH: 30                 # 总训练轮数 (对齐基准：30 Epoch)
   GIOU_WEIGHT: 2.0          # 【新增】GIoU Loss 权重 (对齐基准)
@@ -84,7 +84,7 @@ TRAIN:
   NUM_WORKER: 8             # 数据加载线程数
   OPTIMIZER: "ADAMW"        # 优化器类型
   LR_SCHEDULER: "cosine"    # 学习率调度策略
-  PRINT_INTERVAL: 51        # 日志打印间隔
+  PRINT_INTERVAL: 50        # 日志打印间隔
   SCHEDULER:
     TYPE: "step"
     DECAY_RATE: 0.1

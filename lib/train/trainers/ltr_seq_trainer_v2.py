@@ -71,7 +71,7 @@ class LTRSeqTrainerV2(BaseTrainer):
 
     def cycle_dataset(self, loader):
         """Do a cycle of training or validation."""
-        torch.autograd.set_detect_anomaly(True)
+        # torch.autograd.set_detect_anomaly(True)
         self.actor.train(loader.training)
         torch.set_grad_enabled(loader.training)
 
@@ -120,7 +120,8 @@ class LTRSeqTrainerV2(BaseTrainer):
 
             # Training mode
             cursor = 0
-            bs_backward = 1
+            bs_backward = num_seq
+            # print(f"[DEBUG] num_seq: {num_seq}, bs_backward: {bs_backward}")
 
             # print(self.actor.net.module.box_head.decoder.layers[2].mlpx.fc1.weight)
             if loader.training:
@@ -171,7 +172,7 @@ class LTRSeqTrainerV2(BaseTrainer):
             batch_size = num_seq * np.max(data['num_frames'])
             self._update_stats(stats, batch_size, loader)
             self._print_stats(i, loader, batch_size)
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             
         if hasattr(self, 'pbar'):
             self.pbar.close()

@@ -1,0 +1,29 @@
+name: mtrack
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch=2.1.1
+  - torchvision=0.16.1
+  - torchaudio=2.1.1
+  - pytorch-cuda=11.8
+  - numpy=1.26.3
+  - pip
+  - pip:
+    - mamba-ssm==2.2.2
+    - causal-conv1d==1.4.0
+    - opencv-python==4.12.0.88
+    - pandas==2.3.3
+    - jpeg4py==0.1.4
+    - tensorboard
+    - tqdm
+    - pyyaml
+    - timm
+    - colorama
+    - lmdb
+    - scipy
+    - visdom
+    - easydict
