@@ -163,9 +163,19 @@ def build_artrackv2_seq(cfg, training=True):
         hidden_dim,
     )
     load_from = cfg.MODEL.PRETRAIN_PTH
-    checkpoint = torch.load(load_from, map_location="cpu")
-    missing_keys, unexpected_keys = model.load_state_dict(checkpoint["net"], strict=False)
-    print('Load pretrained model from: ' + load_from)
+    if load_from is not None and load_from != '':
+        print("Loading ARTrackV2 from", load_from)
+        checkpoint = torch.load(load_from, map_location="cpu")
+        if 'net' in checkpoint:
+             missing_keys, unexpected_keys = model.load_state_dict(checkpoint["net"], strict=False)
+        elif 'model' in checkpoint:
+             missing_keys, unexpected_keys = model.load_state_dict(checkpoint["model"], strict=False)
+        else:
+             missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+        print('Load pretrained model from: ' + load_from)
+    else:
+        print("Warning: No pretrained weights loaded for ARTrackV2 (Benchmarking random init)")
+
     if 'sequence' in cfg.MODEL.PRETRAIN_FILE and training:
         print("i change myself")
         checkpoint = torch.load(cfg.MODEL.PRETRAIN_FILE, map_location="cpu")
