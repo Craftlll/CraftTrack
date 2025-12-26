@@ -256,10 +256,10 @@ class SequenceSampler(torch.utils.data.Dataset):
         template_bbox = [bbox.numpy() for bbox in template_anno['bbox']]  # tensor -> numpy array
         search_bbox = [bbox.numpy() for bbox in search_anno['bbox']]  # tensor -> numpy array
 
-        return TensorDict({'template_images': np.array(template_frames).squeeze(),  # 1 template images
-                           'template_annos': np.array(template_bbox).squeeze(),
-                           'search_images': np.array(search_frames),  # (num_frames) search images
-                           'search_annos': np.array(search_bbox),
+        return TensorDict({'template_images': template_frames,  # Keep as list
+                           'template_annos': template_bbox,     # Keep as list
+                           'search_images': search_frames,      # Keep as list
+                           'search_annos': search_bbox,         # Keep as list
                            'seq_id': seq_id,
                            'dataset': dataset.get_name(),
                            'search_class': meta_obj_search.get('object_class_name'),

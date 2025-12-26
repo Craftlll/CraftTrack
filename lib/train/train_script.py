@@ -166,28 +166,30 @@ def run(settings):
     elif settings.script_name == "artrackv2":
         net = build_artrackv2(cfg)
         loader_train, loader_val = build_dataloaders(cfg, settings)
-    elif settings.script_name == "artrackv2_seq":
-        net = build_artrackv2_seq(cfg)
+    elif settings.script_name == "artrackmamba_seq":
+        net = build_artrackmamba_seq(cfg)
+        # Using sequence_sampler_v2 similar to artrackv2_seq
+        # Update: Use cfg.DATA.TEMPLATE.NUMBER instead of hardcoded 1
+        num_template_frames = getattr(cfg.DATA.TEMPLATE, "NUMBER", 1)
+        
         dataset_train = sequence_sampler_v2.SequenceSampler(
             datasets=names2datasets(cfg.DATA.TRAIN.DATASETS_NAME, settings, opencv_loader),
             p_datasets=cfg.DATA.TRAIN.DATASETS_RATIO,
             samples_per_epoch=cfg.DATA.TRAIN.SAMPLE_PER_EPOCH,
             max_gap=cfg.DATA.MAX_GAP, max_interval=cfg.DATA.MAX_INTERVAL,
-            num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=1,
+            num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=num_template_frames,
             frame_sample_mode='random_interval',
             prob=cfg.DATA.INTERVAL_PROB)
         loader_train = SLTLoader('train', dataset_train, training=True, batch_size=cfg.TRAIN.BATCH_SIZE,
                                  num_workers=cfg.TRAIN.NUM_WORKER,
                                  shuffle=False, drop_last=True)
-    elif settings.script_name == "artrackmamba_seq":
-        net = build_artrackmamba_seq(cfg)
-        # Using sequence_sampler_v2 similar to artrackv2_seq
-        dataset_train = sequence_sampler_v2.SequenceSampler(
-            datasets=names2datasets(cfg.DATA.TRAIN.DATASETS_NAME, settings, opencv_loader),
-            p_datasets=cfg.DATA.TRAIN.DATASETS_RATIO,
-            samples_per_epoch=cfg.DATA.TRAIN.SAMPLE_PER_EPOCH,
+        
+        dataset_val = sequence_sampler_v2.SequenceSampler(
+            datasets=names2datasets(cfg.DATA.VAL.DATASETS_NAME, settings, opencv_loader),
+            p_datasets=cfg.DATA.VAL.DATASETS_RATIO,
+            samples_per_epoch=cfg.DATA.VAL.SAMPLE_PER_EPOCH,
             max_gap=cfg.DATA.MAX_GAP, max_interval=cfg.DATA.MAX_INTERVAL,
-            num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=1,
+            num_search_frames=cfg.DATA.SEARCH.NUMBER, num_template_frames=num_template_frames,
             frame_sample_mode='random_interval',
             prob=cfg.DATA.INTERVAL_PROB)
         loader_train = SLTLoader('train', dataset_train, training=True, batch_size=cfg.TRAIN.BATCH_SIZE,

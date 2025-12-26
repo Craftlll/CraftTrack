@@ -19,6 +19,7 @@ DATA:
     FACTOR: 2.0            # 模板区域相对于目标大小的倍数 (2倍于目标)
     SCALE_JITTER: 0        # 模板区域尺度抖动 (通常为0，保持模板真实尺度)
     SIZE: 128              # 模板区域输入图像尺寸 (128x128)
+    NUMBER: 2              # 模板帧数量 (对齐基准：初始模板 + 动态模板)
   TRAIN:
     DATASETS_NAME:         # 训练数据集列表
     - GOT10K_train_full    # 【修改】使用 GOT10K 全量训练集，对齐基准
@@ -39,6 +40,7 @@ MODEL:
     # Vim-Tiny: 192 dim, 24 layers (Vision Mamba Tiny 版本)
     TYPE: "vim_tiny_patch16_224_bimamba_v2_final" # 主干网络具体型号
     STRIDE: 16             # Patch Stride (通常等于 Patch Size)
+    PATCHSIZE: 16          # 【新增】MaskDecoder 需要此参数来计算 Patch 数量
     PRETRAINED: True       # 是否加载预训练权重
     PRETRAINED_PATH: "pretrained_models/vim/vim_t_midclstok_76p1acc.pth" # 预训练权重路径
     DROP_PATH_RATE: 0.0    # Drop Path 比率 (Tiny模型通常不需要太强的DropPath)
@@ -46,7 +48,20 @@ MODEL:
   HEAD:
     TYPE: "CENTER"         # 检测头类型 (CenterHead: 预测中心点和尺寸)
     NUM_CHANNELS: 192      # Head输入通道数 (【关键】必须匹配 Backbone 输出维度)
-    VOCAB_SIZE: 4096       # 离散化坐标的词表大小 (将坐标分为4096个bins)
+    VOCAB_SIZE: 806        # 【修正】离散化坐标的词表大小 (4096->806)，匹配 BINS 和 RANGE
+
+  # 【新增】必须补全的参数
+  BINS: 400
+  RANGE: 2
+  PRENUM: 7
+  
+  DECODER:                 # MaskDecoder 配置
+    TYPE: "mask"
+    MASK_RATIO: 0.75
+    EMBEDDIM: 512
+    DEPTH: 8
+    NUMHEADS: 16
+    MLPRATIO: 4
 
   MEMORY:
     USE: True              # 是否开启记忆/动态模板更新机制
@@ -62,6 +77,8 @@ TRAIN:
   BATCH_SIZE: 64            # 批次大小 (Tiny模型显存占用小，可开大以稳定梯度)
   DEEP_SUPERVISION: False   # 深层监督 (是否计算中间层Loss，此处关闭)
   EPOCH: 30                 # 总训练轮数 (对齐基准：30 Epoch)
+  GIOU_WEIGHT: 2.0          # 【新增】GIoU Loss 权重 (对齐基准)
+  L1_WEIGHT: 0.0            # 【新增】L1 Loss 权重 (对齐基准)
   grad_clip_max_norm: 0.1   # 梯度裁剪阈值 (防止梯度爆炸，Mamba/Transformer必备)
   LR: 0.0001                # 初始学习率 (1e-4，AdamW标准配置)
   MIN_LR: 0.00001           # 最小学习率 (1e-5，余弦退火下限)
