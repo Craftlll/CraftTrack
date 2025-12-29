@@ -132,6 +132,13 @@ def extract_results(trackers, dataset, report_name, skip_missing_seq=False, plot
             base_results_path = '{}/{}'.format(trk.results_dir, seq.name)
             results_path = '{}.txt'.format(base_results_path)
 
+            if not os.path.isfile(results_path):
+                # Try to search in subdirectories (e.g. got10k/GOT-10k_Test_000001.txt)
+                # Some datasets like GOT-10k create a subfolder with the dataset name
+                potential_path = '{}/{}/{}.txt'.format(trk.results_dir, seq.dataset, seq.name)
+                if os.path.isfile(potential_path):
+                    results_path = potential_path
+
             if os.path.isfile(results_path):
                 pred_bb = torch.tensor(load_text(str(results_path), delimiter=('\t', ','), dtype=np.float64))
             else:

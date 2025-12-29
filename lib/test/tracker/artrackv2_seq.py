@@ -20,7 +20,19 @@ class ARTrackV2Seq(BaseTracker):
     def __init__(self, params, dataset_name):
         super(ARTrackV2Seq, self).__init__(params)
         network = build_artrackv2_seq(params.cfg, training=False)
-        network.load_state_dict(torch.load(self.params.checkpoint, map_location='cpu')['net'], strict=True)
+        try:
+            network.load_state_dict(torch.load(self.params.checkpoint, map_location='cpu')['net'], strict=True)
+        except Exception as e:
+            print(f"Error loading checkpoint from {self.params.checkpoint}: {e}")
+            print("Attempting to load from pretrained model path...")
+            # Fallback to a hardcoded or configured pretrained path if the training checkpoint is missing
+            # This is a temporary fix based on the user's situation
+            fallback_path = "/root/CraftTrack/pretrained_models/artrackv2/ARTrackV2_base_256_got.pth.tar"
+            if os.path.exists(fallback_path):
+                print(f"Loading fallback model from: {fallback_path}")
+                network.load_state_dict(torch.load(fallback_path, map_location='cpu')['net'], strict=True)
+            else:
+                raise FileNotFoundError(f"Neither the checkpoint {self.params.checkpoint} nor the fallback {fallback_path} exists.")
 
         self.cfg = params.cfg
         self.bins = params.cfg.MODEL.BINS

@@ -38,3 +38,6 @@ output*/
 
 # Pretrained models
 pretrained_models/
+
+# 权重
+*.pth
