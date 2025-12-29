@@ -274,6 +274,8 @@ class LTRSeqTrainerV2(BaseTrainer):
         # Record learning rate
         for loader in self.loaders:
             if loader.training:
+                if self.stats[loader.name] is None:
+                    continue
                 try:
                     lr_list = self.lr_scheduler.get_last_lr()
                 except:

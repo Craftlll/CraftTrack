@@ -9,7 +9,7 @@ DATA:
     FACTOR: 4.0            # 搜索区域相对于目标大小的倍数 (4倍于目标)
     SCALE_JITTER: 0.25     # 搜索区域尺度抖动范围 (数据增强：模拟目标缩放)
     SIZE: 256              # 搜索区域输入图像尺寸 (256x256)
-    NUMBER: 3             # 搜索帧数量 (序列长度，关键参数：决定显存占用和时序信息量)
+    NUMBER: 6             # 搜索帧数量 (序列长度，关键参数：决定显存占用和时序信息量)
   STD:                     # 图像归一化标准差 (ImageNet标准)
   - 0.229
   - 0.224
@@ -49,7 +49,7 @@ MODEL:
     PATCHSIZE: 16          # Patch Size (分块大小，MaskDecoder 需要此参数来计算 Patch 数量)
     PRETRAINED: True       # 是否加载 Backbone 的预训练权重 (ImageNet 预训练)
     PRETRAINED_PATH: "pretrained_models/vim/vim_b_midclstok_81p9acc.pth" # Backbone 预训练权重路径
-    DROP_PATH_RATE: 0.1    # Drop Path 比率 (随机深度正则化，防止过拟合)
+    DROP_PATH_RATE: 0.1    # [回调] 0.2 -> 0.1
 
   HEAD:
     TYPE: PIX              # Head 类型 (PIX: 基于像素/Token的预测头)
@@ -71,18 +71,21 @@ TRAIN:
   EPOCH: 30                # 总训练轮数
   GIOU_WEIGHT: 2.0         # GIoU Loss 权重 (边界框回归损失)
   L1_WEIGHT: 0.0           # L1 Loss 权重 (GOT配置通常设为0，主要依赖 GIoU 和 Focal)
-  GRAD_CLIP_NORM: 0.1      # 梯度裁剪阈值 (防止梯度爆炸)
-  LR: 0.00001              # 基础学习率 (AdamW)
-  LR_DROP_EPOCH: 999       # 学习率阶梯下降的 Epoch (999表示不使用 StepLR，可能使用 Cosine)
+  GRAD_CLIP_NORM: 0.1      # [回调] 梯度裁剪 1.0 -> 0.1 (必修课，防止梯度爆炸)
+  LR: 0.00005              # [回调] 基础学习率 4e-4 -> 5e-5 (保守起步，防止震荡)
+  LR_DROP_EPOCH: 30        # 配合 Cosine，设为总 Epoch
   NUM_WORKER: 6            # 数据加载线程数
   OPTIMIZER: ADAMW         # 优化器类型
   PRINT_INTERVAL: 1        # 日志打印间隔 (Step)
   SCHEDULER:
-    TYPE: step             # 学习率调度器类型
-    DECAY_RATE: 0.05       # 衰减率
+    TYPE: warmup_cosine    # 保持 Cosine，这没问题
+    DECAY_RATE: 0.1        # 衰减率
+    WARMUP_EPOCH: 5        # 保持预热
+    WARMUP_FACTOR: 0.01    # 保持预热
   VAL_EPOCH_INTERVAL: 10   # 验证间隔 Epoch
   WEIGHT_DECAY: 0.05       # 权重衰减 (L2 正则化)
   AMP: True               # 是否开启混合精度训练 (False: FP32, True: FP16)
+  SAMPLE_PER_EPOCH: 60000
 
 TEST:
   EPOCH: 30                # 测试时加载的 Checkpoint Epoch

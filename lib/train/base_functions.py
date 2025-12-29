@@ -1,3 +1,4 @@
+import math
 import torch
 from torch.utils.data.distributed import DistributedSampler
 # datasets related
@@ -234,6 +235,21 @@ def get_optimizer_scheduler_v2(net, cfg):
         lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer,
                                                             milestones=cfg.TRAIN.SCHEDULER.MILESTONES,
                                                             gamma=cfg.TRAIN.SCHEDULER.GAMMA)
+    elif cfg.TRAIN.SCHEDULER.TYPE == "warmup_cosine":
+        print("Using warmup cosine scheduler")
+        def lr_lambda(epoch):
+            if epoch < cfg.TRAIN.SCHEDULER.WARMUP_EPOCH:
+                # Linear warmup
+                alpha = epoch / cfg.TRAIN.SCHEDULER.WARMUP_EPOCH
+                warmup_factor = cfg.TRAIN.SCHEDULER.WARMUP_FACTOR
+                return warmup_factor + (1.0 - warmup_factor) * alpha
+            else:
+                # Cosine decay
+                T_max = cfg.TRAIN.EPOCH - cfg.TRAIN.SCHEDULER.WARMUP_EPOCH
+                T_cur = epoch - cfg.TRAIN.SCHEDULER.WARMUP_EPOCH
+                return 0.5 * (1.0 + math.cos(math.pi * T_cur / T_max))
+        
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
     else:
         raise ValueError("Unsupported scheduler")
     return optimizer, lr_scheduler

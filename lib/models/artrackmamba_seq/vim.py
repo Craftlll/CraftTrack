@@ -32,30 +32,47 @@ class VimBlock(nn.Module):
         
         self.norm = norm_cls(dim)
         
-        # [优化关键点] 参数量优化：共享权重的双向 Mamba
-        # 之前使用了两个独立的 mixer 导致参数量翻倍。现在改为共享同一个 mixer。
-        # 虽然计算量(FLOPs)依然是 2 倍，但参数量减半，内存带宽压力减小。
+        # 参数量优化：共享权重的双向 Mamba
         self.mixer = mixer_cls(dim)
         
+        # [回退] 移除 MLP Gate，使用简单融合以排查梯度爆炸
+        # self.gate_fc = ... 
+        
+        # [改进] Local Convolution (Inductive Bias) - 保留，因为它对视觉任务很重要且通常比较稳定
+        # Mamba 擅长 Global，引入一个 depthwise conv 补充 Local 归纳偏置
+        self.local_conv = nn.Conv1d(dim, dim, kernel_size=3, padding=1, groups=dim)
+        
+        # [回退] 移除 LayerScale，使用标准 Residual
+        # self.gamma = ...
+        
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        
+        # Init local conv to be identity-like
+        nn.init.constant_(self.local_conv.weight, 1.0/3.0) # Average smoothing init
+        nn.init.constant_(self.local_conv.bias, 0)
 
     def forward(self, x, inference_params=None):
         # x: [B, L, D]
         shortcut = x
         x = self.norm(x)
         
-        # Bidirectional Scanning with Shared Weights
-        # 1. Forward Pass
+        # [改进] Local Feature Extraction
+        # 转置为 [B, D, L] 进行卷积，再转回来
+        x_local = self.local_conv(x.transpose(1, 2)).transpose(1, 2)
+        x = x + x_local # Residual connection for local conv
+        
+        # Bidirectional Scanning
+        # Forward
         x_fwd = self.mixer(x)
         
-        # 2. Backward Pass (Reuse the same mixer)
-        # Flip input -> Run Mixer -> Flip output back
+        # Backward (Reuse the same mixer)
         x_rev = x.flip([1])
         x_bwd = self.mixer(x_rev).flip([1])
         
-        # Fusion
+        # [回退] Simple Mean Fusion
         x_out = (x_fwd + x_bwd) / 2.0
         
+        # [回退] Standard DropPath
         x = shortcut + self.drop_path(x_out)
         return x
 
@@ -92,10 +109,14 @@ class VisionMamba(nn.Module):
         # 2. Tokens & Pos Embed
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        
+        # [改进] Search Region Pos Bias
+        # 显式可学习偏差，用于区分 Template 和 Search 区域的位置空间
+        self.search_pos_bias = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         # 3. Layers
-        # 逐渐增加 drop path rate
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
         
         self.layers = nn.ModuleList([
@@ -111,19 +132,19 @@ class VisionMamba(nn.Module):
         # 4. Final Norm
         self.norm = norm_layer(embed_dim)
         
-        # 初始化
         self._init_weights()
 
     def _init_weights(self):
         trunc_normal_(self.pos_embed, std=.02)
         nn.init.normal_(self.cls_token, std=.02)
+        trunc_normal_(self.search_pos_bias, std=.02) # 初始化 Bias
+        
         self.apply(self._init_weights_modules)
 
     def _init_weights_modules(self, m):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
-                # 保护 Mamba 内部参数初始化
                 if not getattr(m.bias, "_no_reinit", False):
                      nn.init.constant_(m.bias, 0)
                      
@@ -132,8 +153,6 @@ class VisionMamba(nn.Module):
             nn.init.constant_(m.weight, 1.0)
             
         # Mamba 稳健初始化
-        # 初始化 Mamba 输出投影层为 0，使得初始状态下相当于 Identity Mapping
-        # 这有助于深层网络的训练稳定性
         if isinstance(m, Mamba):
             if hasattr(m, 'out_proj'):
                 nn.init.constant_(m.out_proj.weight, 0)
@@ -141,20 +160,17 @@ class VisionMamba(nn.Module):
                     nn.init.constant_(m.out_proj.bias, 0)
 
     def get_posembed(self, seq_len, start_index=1):
-        # 动态位置编码插值，用于适配不同分辨率输入
         pos_embed_no_cls = self.pos_embed[:, 1:, :] 
         if seq_len == pos_embed_no_cls.shape[1]:
             return pos_embed_no_cls
         
         N = pos_embed_no_cls.shape[1]
         
-        # 处理非正方形的情况，假设 seq_len 是 H*W
-        # 如果无法开方整数，则做简单插值
+        # 处理非正方形插值
         if int(math.sqrt(seq_len)) ** 2 != seq_len:
-             # 如果不是正方形，尝试作为 1D 序列插值
-             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2) # [1, D, N]
+             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2)
              pos_embed_no_cls = F.interpolate(pos_embed_no_cls, size=(seq_len), mode='linear', align_corners=False)
-             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2) # [1, seq_len, D]
+             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2)
              return pos_embed_no_cls
              
         orig_size = int(math.sqrt(N))
@@ -168,32 +184,29 @@ class VisionMamba(nn.Module):
     def forward_embeddings(self, z, x):
         """
         仅执行 Embedding 和 Positional Encoding，不进入 Layers。
-        用于在主模型中插入 Prompt Tokens。
         """
         # Patch Embed
         z_feat = self.patch_embed(z)
         x_feat = self.patch_embed(x)
         
         # Pos Embed
+        # Template 使用原始 Pos Embed
         z_feat = z_feat + self.get_posembed(z_feat.shape[1])
-        x_feat = x_feat + self.get_posembed(x_feat.shape[1])
+        
+        # Search 使用 Pos Embed + 额外的 Learnable Bias
+        # 这有助于模型区分“这是模板”还是“这是搜索区域”，避免位置混淆
+        x_feat = x_feat + self.get_posembed(x_feat.shape[1]) + self.search_pos_bias
         
         return z_feat, x_feat
 
     def forward_backbone(self, x_cat):
-        """
-        接收拼接好的序列 (Template + Prompts + Search)，执行 SSM 建模。
-        """
         x_cat = self.pos_drop(x_cat)
-        
         for layer in self.layers:
             x_cat = layer(x_cat)
-            
         x_cat = self.norm(x_cat)
         return x_cat
 
     def forward(self, z, x, **kwargs):
-        # 兼容旧接口：直接处理 Z 和 X
         z_feat, x_feat = self.forward_embeddings(z, x)
         x_cat = torch.cat([z_feat, x_feat], dim=1)
         return self.forward_backbone(x_cat)
@@ -204,21 +217,18 @@ class VisionMamba(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         
-        # [修改] 恢复常规加载逻辑，不再需要处理 fwd/bwd 映射
         new_state_dict = {}
         for k, v in state_dict.items():
             new_state_dict[k] = v
 
-        # 兼容性处理：conv1d 权重尺寸及其他过滤
+        # 兼容性处理
         for k in list(new_state_dict.keys()):
             if "conv1d.weight" in k:
                 weight = new_state_dict[k]
-                # 假设当前模型 conv 是 3，预训练是 4
                 if weight.shape[-1] != 3: 
-                     # 简单的 slice，具体取决于预训练实现
                      new_state_dict[k] = weight[..., :3]
 
-        keys_to_ignore = ['head.weight', 'head.bias']
+        keys_to_ignore = ['head.weight', 'head.bias', 'search_pos_bias']
         for k in keys_to_ignore:
             if k in new_state_dict: del new_state_dict[k]
                 
@@ -227,7 +237,6 @@ class VisionMamba(nn.Module):
             print(f"Loaded successfully. Missing keys: {len(msg.missing_keys)}")
 
 # Builders
-# 保持 ssm_ratio=2.0 也是控制参数量的关键 (Vim默认是2.0, Mamba论文是2.0)
 def vim_tiny_patch16_224_bimamba_v2_final(**kwargs):
     # 使用 RMSNorm 可能会更加稳定，这里保留 LayerNorm 作为默认，但可以通过 kwargs 覆盖
     return VisionMamba(embed_dim=192, depth=24, ssm_d_state=16, ssm_ratio=2.0, **kwargs)
