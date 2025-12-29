@@ -8,23 +8,57 @@ from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 from lib.models.layers.patch_embed_mamba import PatchEmbed
 from lib.utils.misc import is_main_process
 
-from mamba_ssm import Mamba
+try:
+    from mamba_ssm import Mamba
+except ImportError:
+    Mamba = None
+    print("Warning: mamba_ssm not found.")
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        output = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+        return output * self.weight
 
 class VimBlock(nn.Module):
     def __init__(self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False, drop_path=0.):
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
+        
+        # 1. Norm Layer: 使用 RMSNorm 或 LayerNorm
         self.norm = norm_cls(dim)
-        self.mixer = mixer_cls(dim)
+        
+        # 2. Bidirectional Mamba Mixers
+        # 实例化两个独立的 Mamba 用于前向和后向扫描
+        # 为了防止梯度爆炸，建议在 mixer 内部使用更小的初始化方差或者在 Block 输出处使用 scale
+        self.mixer_fwd = mixer_cls(dim)
+        self.mixer_bwd = mixer_cls(dim)
+        
+        # 3. Drop Path
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, inference_params=None):
         # x: [B, L, D]
         shortcut = x
         x = self.norm(x)
-        x = self.mixer(x)
-        x = shortcut + self.drop_path(x)
+        
+        # Bidirectional Scanning
+        # Forward
+        x_fwd = self.mixer_fwd(x)
+        
+        # Backward (Flip -> Process -> Flip back)
+        x_rev = x.flip([1])
+        x_bwd = self.mixer_bwd(x_rev).flip([1])
+        
+        # Fusion: 平均可以保持方差稳定，防止数值过大
+        x_out = (x_fwd + x_bwd) / 2.0
+        
+        x = shortcut + self.drop_path(x_out)
         return x
 
 class VisionMamba(nn.Module):
@@ -63,7 +97,9 @@ class VisionMamba(nn.Module):
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         # 3. Layers
+        # 逐渐增加 drop path rate
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]
+        
         self.layers = nn.ModuleList([
             VimBlock(
                 dim=embed_dim, 
@@ -76,6 +112,8 @@ class VisionMamba(nn.Module):
         
         # 4. Final Norm
         self.norm = norm_layer(embed_dim)
+        
+        # 初始化
         self._init_weights()
 
     def _init_weights(self):
@@ -87,12 +125,22 @@ class VisionMamba(nn.Module):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
-                # 修复: 跳过 dt_proj 的 bias 初始化，防止破坏 Mamba 的数值稳定性
+                # 保护 Mamba 内部参数初始化
                 if not getattr(m.bias, "_no_reinit", False):
                      nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
+                     
+        elif isinstance(m, nn.LayerNorm) or isinstance(m, RMSNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+            
+        # [针对梯度爆炸的特殊初始化]
+        # 初始化 Mamba 输出投影层为 0，使得初始状态下相当于 Identity Mapping
+        # 这有助于深层网络的训练稳定性
+        if isinstance(m, Mamba):
+            if hasattr(m, 'out_proj'):
+                nn.init.constant_(m.out_proj.weight, 0)
+                if m.out_proj.bias is not None:
+                    nn.init.constant_(m.out_proj.bias, 0)
 
     def get_posembed(self, seq_len, start_index=1):
         # 动态位置编码插值，用于适配不同分辨率输入
@@ -102,6 +150,16 @@ class VisionMamba(nn.Module):
         
         N = pos_embed_no_cls.shape[1]
         orig_size = int(math.sqrt(N))
+        
+        # 处理非正方形的情况，假设 seq_len 是 H*W
+        # 如果无法开方整数，则做简单插值
+        if int(math.sqrt(seq_len)) ** 2 != seq_len:
+             # 如果不是正方形，尝试作为 1D 序列插值
+             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2) # [1, D, N]
+             pos_embed_no_cls = F.interpolate(pos_embed_no_cls, size=(seq_len), mode='linear', align_corners=False)
+             pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2) # [1, seq_len, D]
+             return pos_embed_no_cls
+             
         new_size = int(math.sqrt(seq_len))
         
         pos_embed_no_cls = pos_embed_no_cls.reshape(1, orig_size, orig_size, -1).permute(0, 3, 1, 2)
@@ -148,33 +206,44 @@ class VisionMamba(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         
-        # 兼容性处理：处理 conv1d 权重尺寸不匹配问题
-        # 预训练权重可能是 [D, 1, 4]，但当前模型可能是 [D, 1, 3]
-        for k in list(state_dict.keys()):
+        # 处理双向权重加载逻辑
+        # 如果预训练权重是单向的，我们初始化双向权重:
+        # fwd 使用预训练权重, bwd 复制 fwd 的权重 (或者随机初始化)
+        # 这是一个常见的 trick，使得双向初始状态是对称的
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if 'mixer.' in k:
+                # 将 mixer.xxx 映射到 mixer_fwd.xxx 和 mixer_bwd.xxx
+                base_name = k.replace('mixer.', '')
+                new_state_dict[k.replace('mixer.', 'mixer_fwd.')] = v
+                new_state_dict[k.replace('mixer.', 'mixer_bwd.')] = v # 复用权重初始化 Bwd
+            else:
+                new_state_dict[k] = v
+
+        # 兼容性处理：conv1d 权重尺寸及其他过滤
+        for k in list(new_state_dict.keys()):
             if "conv1d.weight" in k:
-                weight = state_dict[k]
-                if weight.shape[-1] == 4 and self.state_dict()[k].shape[-1] == 3:
-                    if is_main_process():
-                        print(f"Resizing {k} from {weight.shape} to {self.state_dict()[k].shape}")
-                    # 简单截断或调整，通常 Vim 的实现细节可能有微调
-                    # 如果预训练是核大小 4，当前是 3，我们取前 3 或中间 3？
-                    # 假设是 padding 导致的差异，通常取 [:3]
-                    state_dict[k] = weight[:, :, :3]
+                weight = new_state_dict[k]
+                # 假设当前模型 conv 是 3，预训练是 4
+                if weight.shape[-1] != 3: 
+                     # 简单的 slice，具体取决于预训练实现
+                     new_state_dict[k] = weight[..., :3]
 
         keys_to_ignore = ['head.weight', 'head.bias']
         for k in keys_to_ignore:
-            if k in state_dict: del state_dict[k]
+            if k in new_state_dict: del new_state_dict[k]
                 
-        msg = self.load_state_dict(state_dict, strict=False)
+        msg = self.load_state_dict(new_state_dict, strict=False)
         if is_main_process():
             print(f"Loaded successfully. Missing keys: {len(msg.missing_keys)}")
 
 # Builders
 def vim_tiny_patch16_224_bimamba_v2_final(**kwargs):
-    return VisionMamba(embed_dim=192, depth=24, ssm_d_state=16, **kwargs)
+    # 使用 RMSNorm 可能会更加稳定，这里保留 LayerNorm 作为默认，但可以通过 kwargs 覆盖
+    return VisionMamba(embed_dim=192, depth=24, ssm_d_state=16, ssm_ratio=2.0, **kwargs)
 
 def vim_small_patch16_224_bimamba_v2_final(**kwargs):
-    return VisionMamba(embed_dim=384, depth=24, ssm_d_state=16, **kwargs)
+    return VisionMamba(embed_dim=384, depth=24, ssm_d_state=16, ssm_ratio=2.0, **kwargs)
 
 def vim_base_patch16_224_bimamba_v2_final(**kwargs):
-    return VisionMamba(embed_dim=768, depth=24, ssm_d_state=16, **kwargs)
+    return VisionMamba(embed_dim=768, depth=24, ssm_d_state=16, ssm_ratio=2.0, **kwargs)
