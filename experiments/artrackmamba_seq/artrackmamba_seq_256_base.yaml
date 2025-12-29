@@ -9,7 +9,7 @@ DATA:
     FACTOR: 4.0            # 搜索区域相对于目标大小的倍数 (4倍于目标)
     SCALE_JITTER: 0.25     # 搜索区域尺度抖动范围 (数据增强：模拟目标缩放)
     SIZE: 256              # 搜索区域输入图像尺寸 (256x256)
-    NUMBER: 2              # 搜索帧数量 (提升到6帧以利用时序信息，对比基准，兼顾显存)
+    NUMBER: 3             # 搜索帧数量 (序列长度，关键参数：决定显存占用和时序信息量)
   STD:                     # 图像归一化标准差 (ImageNet标准)
   - 0.229
   - 0.224
@@ -19,82 +19,74 @@ DATA:
     FACTOR: 2.0            # 模板区域相对于目标大小的倍数 (2倍于目标)
     SCALE_JITTER: 0        # 模板区域尺度抖动 (通常为0，保持模板真实尺度)
     SIZE: 128              # 模板区域输入图像尺寸 (128x128)
-    NUMBER: 2              # 模板帧数量 (对齐基准：初始模板 + 动态模板)
+    NUMBER: 2              # 模板帧数量 (通常为2：初始模板 + 动态更新模板)
   TRAIN:
     DATASETS_NAME:         # 训练数据集列表
-    - GOT10K_train_full    # 【修改】使用 GOT10K 全量训练集，对齐基准
-    DATASETS_RATIO:        # 各数据集采样比例
+    - GOT10K_train_full    # 使用的数据集名称 (如 LASOT, GOT10K_train_full, TRACKINGNET)
+    DATASETS_RATIO:        # 各数据集采样比例 (多数据集训练时用于平衡样本)
     - 1
-    SAMPLE_PER_EPOCH: 60000 # 每个Epoch采样的样本总数 (保证充分训练)
+    SAMPLE_PER_EPOCH: 1000 # 每个Epoch采样的样本总数 (正式训练建议设为 60000，调试设为 1000)
   VAL:
     DATASETS_NAME:         # 验证数据集列表
-    - GOT10K_official_val  # 【修改】使用 GOT10K 官方验证集，对齐基准
+    - GOT10K_official_val  # 验证集名称
     DATASETS_RATIO:        # 验证集采样比例
     - 1
     SAMPLE_PER_EPOCH: 10000 # 验证集采样样本数
 
 MODEL:
-  NAME: "artrackmamba_seq_256_base" # 模型名称 ID
-  
-  BACKBONE:
-    # Vim-Base: 768 dim, 24 layers (与 ViT-Base 相当，但使用 Mamba 架构)
-    TYPE: "vim_base_patch16_224_bimamba_v2_final" # 主干网络具体型号
-    STRIDE: 16             # Patch Stride
-    PATCHSIZE: 16          # 【新增】MaskDecoder 需要此参数来计算 Patch 数量
-    PRETRAINED: True       # 是否加载预训练权重
-    PRETRAINED_PATH: "pretrained_models/vim/vim_b_midclstok_81p9acc.pth" # 预训练权重路径
-    DROP_PATH_RATE: 0.1    # Drop Path 比率 (Base 模型参数多，需要正则化防止过拟合)
-
-  HEAD:
-    TYPE: "CENTER"         # 检测头类型
-    NUM_CHANNELS: 768      # Head输入通道数 (必须匹配 Base 的 768 维度)
-    VOCAB_SIZE: 806        # 【修正】离散化坐标的词表大小 (400*2 + 6 = 806)，匹配 BINS 和 RANGE
-
+  NAME: "artrackmamba_seq_256_base" # 模型名称 ID (用于生成日志目录名)
+  PRETRAIN_PTH: ""         # 全量模型权重路径 (若需从之前的 Checkpoint 继续训练或微调，在此指定 .pth 路径)
+  # 【新增】显式补全这些关键参数，防止代码使用错误的默认值
   BINS: 400
   RANGE: 2
-  PRENUM: 7                # 历史轨迹/Prompt 长度
+  EXTENSION: 3
+  PRENUM: 7
+
+  BACKBONE:
+    # Vim-Base: 768 dim, 24 layers (与 ViT-Base 相当，但使用 Mamba 架构)
+    TYPE: "vim_base_patch16_224_bimamba_v2_final" # 主干网络具体型号 (决定网络深度和宽度)
+    STRIDE: 16             # Patch Stride (步长，决定特征图分辨率，256/16=16x16)
+    PATCHSIZE: 16          # Patch Size (分块大小，MaskDecoder 需要此参数来计算 Patch 数量)
+    PRETRAINED: True       # 是否加载 Backbone 的预训练权重 (ImageNet 预训练)
+    PRETRAINED_PATH: "pretrained_models/vim/vim_b_midclstok_81p9acc.pth" # Backbone 预训练权重路径
+    DROP_PATH_RATE: 0.1    # Drop Path 比率 (随机深度正则化，防止过拟合)
+
+  HEAD:
+    TYPE: PIX              # Head 类型 (PIX: 基于像素/Token的预测头)
+    NUM_CHANNELS: 768      # Head 的中间层通道数 (通常小于 Backbone 维度)
+    VOCAB_SIZE: 806        # 词表大小 (BINS(400) * RANGE(2) + 6个特殊Token = 806)
   
-  DECODER:                 # MaskDecoder 配置
-    TYPE: "mask"
-    MASK_RATIO: 0.75
-    EMBEDDIM: 512
-    DEPTH: 8
-    NUMHEADS: 16
-    MLPRATIO: 4
-
-  MEMORY:
-    USE: True              # 是否开启记忆/动态模板更新机制
-    CAPACITY: 50           # 记忆库容量
-    UPDATE_INTERVAL: 5     # 记忆更新间隔
-    CONF_THRESHOLD: 0.7    # 记忆更新置信度阈值
-
-  EXTRA:
-    SIGMA_FACTOR: 2.0      # 高斯热图生成的 Sigma 因子
+  DECODER:
+    TYPE: "mask"           # Decoder 类型 (mask: 使用掩码机制的解码器)
+    MASK_RATIO: 0.75       # 掩码比率 (训练时随机 Mask 掉部分特征，迫使模型重建)
+    EMBEDDIM: 512          # Decoder 的嵌入维度
+    DEPTH: 8               # Decoder 的层数
+    NUMHEADS: 16           # Decoder 的注意力头数
+    MLPRATIO: 4            # MLP 扩展比率
 
 TRAIN:
-  BACKBONE_MULTIPLIER: 0.1  # 主干网络学习率倍率 (0.1x LR)
-  BATCH_SIZE: 8            # 批次大小 (Base模型显存占用大，设为16，仍优于基准的8)
-  DEEP_SUPERVISION: False   # 深层监督
-  EPOCH: 30                 # 总训练轮数 (对齐基准：30 Epoch)
-  GIOU_WEIGHT: 2.0          # 【新增】GIoU Loss 权重 (对齐基准)
-  L1_WEIGHT: 0.0            # 【新增】L1 Loss 权重 (对齐基准，ARTrack通常不使用L1回归)
-  grad_clip_max_norm: 0.1   # 梯度裁剪阈值
-  LR: 0.0001                # 初始学习率
-  MIN_LR: 0.00001           # 最小学习率
-  NUM_WORKER: 8             # 数据加载线程数
-  OPTIMIZER: "ADAMW"        # 优化器类型
-  LR_SCHEDULER: "cosine"    # 学习率调度策略
-  PRINT_INTERVAL: 50        # 日志打印间隔
+  BACKBONE_MULTIPLIER: 0.1 # Backbone 的学习率倍率 (Backbone 通常使用较小的 LR 进行微调)
+  DROP_PATH_RATE: 0.1      # 整体 Drop Path 比率
+  BATCH_SIZE: 8            # 批次大小 (受限于显存，序列模型通常较小)
+  EPOCH: 30                # 总训练轮数
+  GIOU_WEIGHT: 2.0         # GIoU Loss 权重 (边界框回归损失)
+  L1_WEIGHT: 0.0           # L1 Loss 权重 (GOT配置通常设为0，主要依赖 GIoU 和 Focal)
+  GRAD_CLIP_NORM: 0.1      # 梯度裁剪阈值 (防止梯度爆炸)
+  LR: 0.00001              # 基础学习率 (AdamW)
+  LR_DROP_EPOCH: 999       # 学习率阶梯下降的 Epoch (999表示不使用 StepLR，可能使用 Cosine)
+  NUM_WORKER: 6            # 数据加载线程数
+  OPTIMIZER: ADAMW         # 优化器类型
+  PRINT_INTERVAL: 1        # 日志打印间隔 (Step)
   SCHEDULER:
-    TYPE: "step"
-    DECAY_RATE: 0.1
-  VAL_EPOCH_INTERVAL: 1     # 验证间隔 (每1个Epoch验证一次)
-  WEIGHT_DECAY: 0.05        # 权重衰减系数 (【修改】提升到0.05，对齐基准)
-  AMP: True                 # 自动混合精度训练
+    TYPE: step             # 学习率调度器类型
+    DECAY_RATE: 0.05       # 衰减率
+  VAL_EPOCH_INTERVAL: 10   # 验证间隔 Epoch
+  WEIGHT_DECAY: 0.05       # 权重衰减 (L2 正则化)
+  AMP: True               # 是否开启混合精度训练 (False: FP32, True: FP16)
 
 TEST:
-  EPOCH: 30                # 测试时使用的模型 Epoch
-  SEARCH_FACTOR: 4.0       # 测试时搜索区域倍率
-  SEARCH_SIZE: 256         # 测试时搜索区域尺寸
-  TEMPLATE_FACTOR: 2.0     # 测试时模板区域倍率
-  TEMPLATE_SIZE: 128       # 测试时模板区域尺寸
+  EPOCH: 30                # 测试时加载的 Checkpoint Epoch
+  SEARCH_FACTOR: 4.0       # 测试时的搜索区域倍数 (需与训练保持一致)
+  SEARCH_SIZE: 256         # 测试时的搜索图像尺寸
+  TEMPLATE_FACTOR: 2.0     # 测试时的模板倍数
+  TEMPLATE_SIZE: 128       # 测试时的模板图像尺寸

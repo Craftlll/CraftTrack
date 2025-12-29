@@ -87,7 +87,9 @@ class VisionMamba(nn.Module):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
+                # 修复: 跳过 dt_proj 的 bias 初始化，防止破坏 Mamba 的数值稳定性
+                if not getattr(m.bias, "_no_reinit", False):
+                     nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)

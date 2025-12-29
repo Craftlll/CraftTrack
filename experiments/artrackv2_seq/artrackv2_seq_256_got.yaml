@@ -38,7 +38,7 @@ MODEL:
   EXTENSION: 3
   PRENUM: 7
   PRETRAIN_FILE: "mae_pretrain_vit_base.pth"
-  PRETRAIN_PTH: "pretrained_models/artrackv2/ARTrackV2_base_256_got.pth.tar"
+  PRETRAIN_PTH: ""
   EXTRA_MERGER: False
   RETURN_INTER: False
   DECODER:
@@ -72,7 +72,7 @@ TRAIN:
     DECAY_RATE: 0.05
   VAL_EPOCH_INTERVAL: 10
   WEIGHT_DECAY: 0.05
-  AMP: False
+  AMP: True
 TEST:
   EPOCH: 30
   SEARCH_FACTOR: 3.95
