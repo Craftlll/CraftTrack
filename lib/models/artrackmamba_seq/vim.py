@@ -30,16 +30,13 @@ class VimBlock(nn.Module):
         self.residual_in_fp32 = residual_in_fp32
         self.fused_add_norm = fused_add_norm
         
-        # 1. Norm Layer: 使用 RMSNorm 或 LayerNorm
         self.norm = norm_cls(dim)
         
-        # 2. Bidirectional Mamba Mixers
-        # 实例化两个独立的 Mamba 用于前向和后向扫描
-        # 为了防止梯度爆炸，建议在 mixer 内部使用更小的初始化方差或者在 Block 输出处使用 scale
-        self.mixer_fwd = mixer_cls(dim)
-        self.mixer_bwd = mixer_cls(dim)
+        # [优化关键点] 参数量优化：共享权重的双向 Mamba
+        # 之前使用了两个独立的 mixer 导致参数量翻倍。现在改为共享同一个 mixer。
+        # 虽然计算量(FLOPs)依然是 2 倍，但参数量减半，内存带宽压力减小。
+        self.mixer = mixer_cls(dim)
         
-        # 3. Drop Path
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x, inference_params=None):
@@ -47,15 +44,16 @@ class VimBlock(nn.Module):
         shortcut = x
         x = self.norm(x)
         
-        # Bidirectional Scanning
-        # Forward
-        x_fwd = self.mixer_fwd(x)
+        # Bidirectional Scanning with Shared Weights
+        # 1. Forward Pass
+        x_fwd = self.mixer(x)
         
-        # Backward (Flip -> Process -> Flip back)
+        # 2. Backward Pass (Reuse the same mixer)
+        # Flip input -> Run Mixer -> Flip output back
         x_rev = x.flip([1])
-        x_bwd = self.mixer_bwd(x_rev).flip([1])
+        x_bwd = self.mixer(x_rev).flip([1])
         
-        # Fusion: 平均可以保持方差稳定，防止数值过大
+        # Fusion
         x_out = (x_fwd + x_bwd) / 2.0
         
         x = shortcut + self.drop_path(x_out)
@@ -133,7 +131,7 @@ class VisionMamba(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
             
-        # [针对梯度爆炸的特殊初始化]
+        # Mamba 稳健初始化
         # 初始化 Mamba 输出投影层为 0，使得初始状态下相当于 Identity Mapping
         # 这有助于深层网络的训练稳定性
         if isinstance(m, Mamba):
@@ -149,7 +147,6 @@ class VisionMamba(nn.Module):
             return pos_embed_no_cls
         
         N = pos_embed_no_cls.shape[1]
-        orig_size = int(math.sqrt(N))
         
         # 处理非正方形的情况，假设 seq_len 是 H*W
         # 如果无法开方整数，则做简单插值
@@ -160,6 +157,7 @@ class VisionMamba(nn.Module):
              pos_embed_no_cls = pos_embed_no_cls.transpose(1, 2) # [1, seq_len, D]
              return pos_embed_no_cls
              
+        orig_size = int(math.sqrt(N))
         new_size = int(math.sqrt(seq_len))
         
         pos_embed_no_cls = pos_embed_no_cls.reshape(1, orig_size, orig_size, -1).permute(0, 3, 1, 2)
@@ -206,19 +204,10 @@ class VisionMamba(nn.Module):
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint['model'] if 'model' in checkpoint else checkpoint
         
-        # 处理双向权重加载逻辑
-        # 如果预训练权重是单向的，我们初始化双向权重:
-        # fwd 使用预训练权重, bwd 复制 fwd 的权重 (或者随机初始化)
-        # 这是一个常见的 trick，使得双向初始状态是对称的
+        # [修改] 恢复常规加载逻辑，不再需要处理 fwd/bwd 映射
         new_state_dict = {}
         for k, v in state_dict.items():
-            if 'mixer.' in k:
-                # 将 mixer.xxx 映射到 mixer_fwd.xxx 和 mixer_bwd.xxx
-                base_name = k.replace('mixer.', '')
-                new_state_dict[k.replace('mixer.', 'mixer_fwd.')] = v
-                new_state_dict[k.replace('mixer.', 'mixer_bwd.')] = v # 复用权重初始化 Bwd
-            else:
-                new_state_dict[k] = v
+            new_state_dict[k] = v
 
         # 兼容性处理：conv1d 权重尺寸及其他过滤
         for k in list(new_state_dict.keys()):
@@ -238,6 +227,7 @@ class VisionMamba(nn.Module):
             print(f"Loaded successfully. Missing keys: {len(msg.missing_keys)}")
 
 # Builders
+# 保持 ssm_ratio=2.0 也是控制参数量的关键 (Vim默认是2.0, Mamba论文是2.0)
 def vim_tiny_patch16_224_bimamba_v2_final(**kwargs):
     # 使用 RMSNorm 可能会更加稳定，这里保留 LayerNorm 作为默认，但可以通过 kwargs 覆盖
     return VisionMamba(embed_dim=192, depth=24, ssm_d_state=16, ssm_ratio=2.0, **kwargs)

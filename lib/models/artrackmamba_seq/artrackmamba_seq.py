@@ -80,6 +80,11 @@ class ARTrackMambaSeq(BaseBackbone):
         self.output_bias = torch.nn.Parameter(torch.zeros(self.bins * self.range + 6))
         self.prev_position_embeddings = nn.Embedding(self.prenum * 4, hidden_dim)
 
+        # [Gradient Explosion Fix] Initialize embeddings with small variance (std=0.02)
+        trunc_normal_(self.word_embeddings.weight, std=.02)
+        trunc_normal_(self.position_embeddings.weight, std=.02)
+        trunc_normal_(self.prev_position_embeddings.weight, std=.02)
+
         self.norm = nn.LayerNorm(hidden_dim) # For output projection
 
         # 4. Components from ARTrackV2Seq
