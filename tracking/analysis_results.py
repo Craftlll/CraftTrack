@@ -29,8 +29,8 @@ dataset_name = 'got10k_test'
 """ostrack"""
 # trackers.extend(trackerlist(name='artrack_seq', parameter_name='artrack_seq_256_full', dataset_name=dataset_name,
 #                             run_ids=None, display_name='ARTrackSeq_256'))
-trackers.extend(trackerlist(name='artrackv2_seq', parameter_name='artrackv2_seq_256_got', dataset_name=dataset_name,
-                            run_ids=None, display_name='ARTrackV2Seq_GOT'))
+trackers.extend(trackerlist(name='artrackmamba_seq', parameter_name='artrackmamba_seq_256_base', dataset_name=dataset_name,
+                            run_ids=None, display_name='ARTrackMambaSeq_256_base'))
 #trackers.extend(trackerlist(name='ostrack', parameter_name='vitb_384_mae_ce_32x4_ep300', dataset_name=dataset_name,
 #.                            run_ids=None, display_name='OSTrack384'))
 

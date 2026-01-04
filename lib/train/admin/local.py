@@ -1,8 +1,8 @@
 class EnvironmentSettings:
     def __init__(self):
-        self.workspace_dir = '/root/CraftTrack'    # Base directory for saving network checkpoints.
-        self.tensorboard_dir = '/root/CraftTrack/tensorboard'    # Directory for tensorboard files.
-        self.pretrained_networks = '/root/CraftTrack/pretrained_networks'
+        self.workspace_dir = '/root/autodl-tmp/CraftTrack'    # Base directory for saving network checkpoints.
+        self.tensorboard_dir = '/root/autodl-tmp/CraftTrack/tensorboard'    # Directory for tensorboard files.
+        self.pretrained_networks = '/root/autodl-tmp/CraftTrack/pretrained_networks'
         self.lasot_dir = '/root/autodl-tmp/data/lasot'
         self.got10k_dir = '/root/autodl-tmp/data/got10k/train'
         self.got10k_val_dir = '/root/autodl-tmp/data/got10k/val'

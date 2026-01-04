@@ -41,3 +41,4 @@ pretrained_models/
 
 # 权重
 *.pth
+checkpoints/

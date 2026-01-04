@@ -22,6 +22,7 @@ class ARTrackV2Seq(BaseTracker):
         network = build_artrackv2_seq(params.cfg, training=False)
         try:
             network.load_state_dict(torch.load(self.params.checkpoint, map_location='cpu')['net'], strict=True)
+            print(f">>> Successfully loaded checkpoint: {self.params.checkpoint}")
         except Exception as e:
             print(f"Error loading checkpoint from {self.params.checkpoint}: {e}")
             print("Attempting to load from pretrained model path...")

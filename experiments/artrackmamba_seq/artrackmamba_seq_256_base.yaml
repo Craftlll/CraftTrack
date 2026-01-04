@@ -88,7 +88,7 @@ TRAIN:
   SAMPLE_PER_EPOCH: 60000
 
 TEST:
-  EPOCH: 30                # 测试时加载的 Checkpoint Epoch
+  EPOCH: 20                # 测试时加载的 Checkpoint Epoch
   SEARCH_FACTOR: 4.0       # 测试时的搜索区域倍数 (需与训练保持一致)
   SEARCH_SIZE: 256         # 测试时的搜索图像尺寸
   TEMPLATE_FACTOR: 2.0     # 测试时的模板倍数
